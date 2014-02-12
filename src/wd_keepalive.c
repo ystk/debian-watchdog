@@ -24,6 +24,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/mman.h>
+#include <sys/ioctl.h>
 #include <sys/wait.h>
 #include <linux/watchdog.h>
 #include <libgen.h>
@@ -211,10 +212,12 @@ int main(int argc, char *const argv[])
 {
     FILE *fp;
     char *configfile = CONFIG_FILENAME;
-    char *filename_buf;
     pid_t child_pid;
     int count = 0;
     int c;
+    int oom_adjusted = 0;
+    struct stat s;
+
     /* allow all options watchdog understands too */
 #if USE_SYSLOG
     char *opts = "d:i:n:fsvbql:p:t:c:r:m:a:";
@@ -282,14 +285,6 @@ int main(int argc, char *const argv[])
         exit(1);
     }
 
-    /* allocate some memory to store a filename, this is needed later on even
-     * if the system runs out of memory */
-    filename_buf = (char*)malloc(strlen("/proc//oom_adj") + sizeof(int) * CHAR_BIT * 10 / 3 + 1);
-    if (!filename_buf) {
-        error(progname);
-        exit(1);
-    }
-
 #if !defined(DEBUG)
     /* fork to go into the background */
     if ( (child_pid = fork()) < 0 ) {
@@ -331,7 +326,10 @@ int main(int argc, char *const argv[])
     /* Log the starting message */
     openlog(progname, LOG_PID, LOG_DAEMON);
     syslog(LOG_INFO, "starting watchdog keepalive daemon (%d.%d):", MAJOR_VERSION, MINOR_VERSION);
-    syslog(LOG_INFO, " int=%d alive=%s realtime=%s", tint, devname, realtime ? "yes" : "no");
+    if (devname == NULL)
+	syslog(LOG_INFO, " no watchdog device configured, aborting");
+    else
+    	syslog(LOG_INFO, " int=%d alive=%s realtime=%s", tint, devname, realtime ? "yes" : "no");
 #endif                          /* USE_SYSLOG */
 
     /* this daemon has no other function than writing to this device 
@@ -403,12 +401,33 @@ int main(int argc, char *const argv[])
 #endif
 
     /* tell oom killer to not kill this process */
-    sprintf(filename_buf, "/proc/%d/oom_adj", getpid());
-    fp = fopen(filename_buf, "w");
-    if (fp != NULL) {
-        fprintf(fp, "-17\n");
-        (void) fclose(fp);
-    }
+#ifdef OOM_SCORE_ADJ_MIN
+   if ( ! stat("/proc/self/oom_score_adj", &s) ) {
+	fp = fopen("/proc/self/oom_score_adj", "w");
+	if (fp) {
+		fprintf(fp, "%d\n", OOM_SCORE_ADJ_MIN);
+		(void) fclose(fp);
+		oom_adjusted = 1;
+	}
+   }
+#endif
+#ifdef OOM_DISABLE
+   if ( ! oom_adjusted ) {
+	if ( ! stat("/proc/self/oom_adj", &s) ) {
+		fp = fopen("/proc/self/oom_adj", "w");
+		if (fp) {
+			fprintf(fp, "%d\n", OOM_DISABLE);
+			(void) fclose(fp);
+			oom_adjusted = 1;
+		}
+	}
+   }
+#endif
+#if USE_SYSLOG
+   if ( ! oom_adjusted ) {
+	syslog(LOG_WARNING, "unable to disable oom handling!");
+   }
+#endif				/* USE_SYSLOG */
 
     /* main loop: update after <tint> seconds */
     while ( _running ) {

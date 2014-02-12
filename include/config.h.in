@@ -180,6 +180,9 @@
 /* Define to 1 if you have the ANSI C header files. */
 #undef STDC_HEADERS
 
+/* "path to test binaries" */
+#undef TESTBIN_PATH
+
 /* "timer margin used by kernel" */
 #undef TIMER_MARGIN
 

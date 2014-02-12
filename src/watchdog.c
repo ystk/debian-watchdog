@@ -27,10 +27,12 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/ioctl.h>
+#include <linux/oom.h>
 #include <linux/watchdog.h>
 #include <string.h>
 
 #include <libgen.h>
+#include <dirent.h>
 
 #include <unistd.h>
 
@@ -39,8 +41,6 @@
 #if USE_SYSLOG
 #include <syslog.h>
 #endif				/* USE_SYSLOG */
-
-#define max(x,y) (x) > (y) ? (x) : (y)
 
 static int no_act = FALSE;
 
@@ -76,6 +76,11 @@ volatile sig_atomic_t _running = 1;
 #define HEARTBEAT	"heartbeat-file"
 #define HBSTAMPS	"heartbeat-stamps"
 #define LOGDIR		"log-dir"
+#define TESTDIR		"test-directory"
+
+#ifndef TESTBIN_PATH
+#define TESTBIN_PATH NULL
+#endif
 
 pid_t pid;
 int tint = 1, softboot = FALSE, watchdog = -1, load = -1, mem = -1, temp = -1;
@@ -99,9 +104,9 @@ static void usage(void)
 {
     fprintf(stderr, "%s version %d.%d, usage:\n", progname, MAJOR_VERSION, MINOR_VERSION);
 #if USE_SYSLOG
-    fprintf(stderr, "%s [-f] [-c <config_file>] [-v] [-s] [-b] [-q]\n", progname);
+    fprintf(stderr, "%s [-F] [-f] [-c <config_file>] [-v] [-s] [-b] [-q]\n", progname);
 #else				/* USE_SYSLOG */
-    fprintf(stderr, "%s [-f] [-c <config_file>] [-s] [-b] [-q]\n", progname);
+    fprintf(stderr, "%s [-F] [-f] [-c <config_file>] [-s] [-b] [-q]\n", progname);
 #endif				/* USE_SYSLOG */
     exit(1);
 }
@@ -117,7 +122,7 @@ static int sync_system(int sync_it)
 }
 
 /* execute repair binary */
-static int repair(char *rbinary, int result, char *name)
+static int repair(char *rbinary, int result, char *name, int version)
 {
     pid_t child_pid;
     pid_t r_pid;
@@ -145,10 +150,17 @@ static int repair(char *rbinary, int result, char *name)
 		exit (errno);
 
         /* now start binary */
-	if (name == NULL)
-		execl(rbinary, rbinary, parm, NULL);
-	else
-		execl(rbinary, rbinary, parm, name, NULL);
+	if (version == 0) {
+		if (name == NULL)
+			execl(rbinary, rbinary, parm, NULL);
+		else
+			execl(rbinary, rbinary, parm, name, NULL);
+	} else /* if (version == 1) */ {
+		if (name == NULL)
+			execl(rbinary, rbinary, "repair", parm, NULL);
+		else
+			execl(rbinary, rbinary, "repair", parm, name, NULL);
+	}
 
 	/* execl should only return in case of an error */
 	/* so we return the reboot code */
@@ -202,7 +214,7 @@ static int repair(char *rbinary, int result, char *name)
     ret = WEXITSTATUS(result);
     if (ret != 0) {
 #if USE_SYSLOG
-	syslog(LOG_ERR, "repair binary returned %d", ret);
+	syslog(LOG_ERR, "repair binary %s returned %d", rbinary, ret);
 #endif				/* USE_SYSLOG */
 
 	if (ret == ERESET) /* repair script says force hard reset, we give it a try */
@@ -215,7 +227,7 @@ static int repair(char *rbinary, int result, char *name)
     return (ENOERR);
 }
 
-static void wd_action(int result, char *rbinary, char *name)
+static void wd_action(int result, char *rbinary, char *name, int version)
 {
     /* if no-action flag set, do nothing */
     /* no error, keep on working */
@@ -224,7 +236,7 @@ static void wd_action(int result, char *rbinary, char *name)
 
     /* error that might be repairable */
     if (result != EREBOOT)
-	result = repair(rbinary, result, name);
+	result = repair(rbinary, result, name, version);
 
     /* if still error, reboot */
     if (result != ENOERR)
@@ -234,9 +246,19 @@ static void wd_action(int result, char *rbinary, char *name)
 
 static void do_check(int res, char *rbinary, char *name)
 {
-    wd_action(res, rbinary, name);
-    wd_action(keep_alive(), rbinary, NULL);
+    wd_action(res, rbinary, name, 0);
+    wd_action(keep_alive(), rbinary, NULL, 0);
 }
+
+static void do_check2(int res, char *r_specific, char *r_global, char *name)
+{
+    wd_action(res, r_specific, name, 1);
+    wd_action(keep_alive(), r_global, NULL, 0);
+}
+
+/* Self-repairing binaries list */
+struct list *tr_bin = NULL;
+char *test_dir = TESTBIN_PATH;
 
 struct list *file = NULL, *target = NULL, *pidfile = NULL, *iface = NULL;
 char *tbinary, *rbinary, *admin;
@@ -460,6 +482,11 @@ static void read_config(char *configfile, char *progname)
 			fprintf(stderr, "Ignoring invalid line in config file:\n%s\n", line);
 		else
 			logdir = strdup(line + i);
+	    } else if (strncmp(line + i, TESTDIR, strlen(TESTDIR)) == 0) {
+		if (spool(line, &i, strlen(TESTDIR)))
+			fprintf(stderr, "Ignoring invalid line in config file: %s ", line);
+		else
+			test_dir = strdup(line + i);
 	    } else {
 		fprintf(stderr, "Ignoring invalid line in config file:\n%s\n", line);
 	    }
@@ -472,6 +499,58 @@ static void read_config(char *configfile, char *progname)
     }
 }
 
+static void add_test_binaries(const char *path)
+{
+    DIR *d;
+    struct dirent dentry;
+    struct dirent *rdret;
+    struct stat sb;
+    int ret;
+    char fname[PATH_MAX];
+    char *fdup;
+
+    if (!path)
+	return;
+    ret = stat(path, &sb);
+    if (ret < 0)
+	return;
+    if (!S_ISDIR(sb.st_mode))
+	return;
+
+    d = opendir(path);
+    if (!d)
+	return;
+    do {
+	ret = readdir_r(d, &dentry, &rdret);
+	if (ret)
+	    break;
+	if (rdret == NULL)
+	    break;
+
+	ret = snprintf(fname, sizeof(fname), "%s/%s",
+		       path, dentry.d_name);
+	if (ret >= sizeof(fname))
+	    continue;
+	ret = stat(fname, &sb);
+	if (ret < 0)
+	    continue;
+	if (!S_ISREG(sb.st_mode))
+	    continue;
+	if (!(sb.st_mode & S_IXUSR))
+	    continue;
+	if (!(sb.st_mode & S_IRUSR))
+	    continue;
+
+	fdup = strdup(fname);
+	if (!fdup)
+	    continue;
+
+	syslog(LOG_DEBUG, "adding %s to list of auto-repair binaries",
+	       fdup);
+	add_list(&tr_bin, fdup);
+    } while (1);
+}
+
 static void old_option(int c, char *configfile)
 {
     fprintf(stderr, "Option -%c is no longer valid, please specify it in %s.\n", c, configfile);
@@ -481,17 +560,20 @@ static void old_option(int c, char *configfile)
 int main(int argc, char *const argv[])
 {
     FILE *fp;
-    int c, force = FALSE, sync_it = FALSE;
+    int c, foreground = FALSE, force = FALSE, sync_it = FALSE;
     int hold;
     char *configfile = CONFIG_FILENAME;
     struct list *act;
     pid_t child_pid;
+    int oom_adjusted = 0;
+    struct stat s;
 
 #if USE_SYSLOG
-    char *opts = "d:i:n:fsvbql:p:t:c:r:m:a:";
+    char *opts = "d:i:n:Ffsvbql:p:t:c:r:m:a:";
     struct option long_options[] =
     {
 	{"config-file", required_argument, NULL, 'c'},
+	{"foreground", no_argument, NULL, 'F'},
 	{"force", no_argument, NULL, 'f'},
 	{"sync", no_argument, NULL, 's'},
 	{"no-action", no_argument, NULL, 'q'},
@@ -502,10 +584,11 @@ int main(int argc, char *const argv[])
     long count = 0L;
     struct watchdog_info ident;
 #else				/* USE_SYSLOG */
-    char *opts = "d:i:n:fsbql:p:t:c:r:m:a:";
+    char *opts = "d:i:n:Ffsbql:p:t:c:r:m:a:";
     struct option long_options[] =
     {
 	{"config-file", required_argument, NULL, 'c'},
+	{"foreground", no_argument, NULL, 'F'},
 	{"force", no_argument, NULL, 'f'},
 	{"sync", no_argument, NULL, 's'},
 	{"no-action", no_argument, NULL, 'q'},
@@ -537,6 +620,9 @@ int main(int argc, char *const argv[])
 	case 'c':
 	    configfile = optarg;
 	    break;
+	case 'F':
+	    foreground = TRUE;
+	    break;
 	case 'f':
 	    force = TRUE;
 	    break;
@@ -560,6 +646,7 @@ int main(int argc, char *const argv[])
     }
 
     read_config(configfile, progname);
+    add_test_binaries(test_dir);
 
     if (tint < 0)
 	usage();
@@ -573,7 +660,7 @@ int main(int argc, char *const argv[])
     
     if (maxload1 > 0 && maxload1 < MINLOAD && !force) {
 	fprintf(stderr, "%s error:\n", progname);
-	fprintf(stderr, "Using this maximal load average might reboot the system to often!\n");
+	fprintf(stderr, "Using this maximal load average might reboot the system too often!\n");
 	fprintf(stderr, "To force this load average use the -f option.\n");
 	exit(1);
     }
@@ -636,49 +723,51 @@ int main(int argc, char *const argv[])
 
     /* allocate some memory to store a filename, this is needed later on even
      * if the system runs out of memory */
-    filename_buf = (char*)malloc(max(strlen(logdir) + sizeof("/repair-bin.stdout") + 1, strlen("/proc//oom_adj") + sizeof(int) * CHAR_BIT * 10 / 3 + 1));
+    filename_buf = (char*)malloc(strlen(logdir) + sizeof("/repair-bin.stdout") + 1);
     if (!filename_buf) {
-	error(progname);
+	perror(progname);
         exit(1);
     }
 
 #if !defined(DEBUG)
-    /* fork to go into the background */
-    if ((child_pid = fork()) < 0) {
-	perror(progname);
-	exit(1);
-    } else if (child_pid > 0) {
-	/* fork was okay          */
-	/* wait for child to exit */
-	if (waitpid(child_pid, NULL, 0) != child_pid) {
-	    perror(progname);
-	    exit(1);
-	}
-	/* and exit myself */
-	exit(0);
-    }
-    /* and fork again to make sure we inherit all rights from init */
-    if ((child_pid = fork()) < 0) {
-	perror(progname);
-	exit(1);
-    } else if (child_pid > 0)
-	exit(0);
-#endif				/* !DEBUG */
+    if ( ! foreground ) {
+	/* fork to go into the background */
+    	if ((child_pid = fork()) < 0) {
+		perror(progname);
+		exit(1);
+    	} else if (child_pid > 0) {
+		/* fork was okay          */
+		/* wait for child to exit */
+		if (waitpid(child_pid, NULL, 0) != child_pid) {
+	    		perror(progname);
+	    		exit(1);
+		}
+		/* and exit myself */
+		exit(0);
+    	}
+    	/* and fork again to make sure we inherit all rights from init */
+    	if ((child_pid = fork()) < 0) {
+		perror(progname);
+		exit(1);
+    	} else if (child_pid > 0)
+		exit(0);
 
-    /* now we're free */
+   	/* now we're free */
 #if USE_SYSLOG
-#if !defined(DEBUG)
-    /* Okay, we're a daemon     */
-    /* but we're still attached to the tty */
-    /* create our own session */
-    setsid();
+    	/* Okay, we're a daemon     */
+    	/* but we're still attached to the tty */
+    	/* create our own session */
+    	setsid();
 
-    /* with USE_SYSLOG we don't do any console IO */
-    close(0);
-    close(1);
-    close(2);
+    	/* with USE_SYSLOG we don't do any console IO */
+    	close(0);
+    	close(1);
+    	close(2);
+#endif				/* USE_SYSLOG */
+    }
 #endif				/* !DEBUG */
 
+#if USE_SYSLOG
     /* Log the starting message */
     openlog(progname, LOG_PID, LOG_DAEMON);
     syslog(LOG_INFO, "starting daemon (%d.%d):", MAJOR_VERSION, MINOR_VERSION);
@@ -713,7 +802,7 @@ int main(int argc, char *const argv[])
             for (act = iface; act != NULL; act = act->next)
                 syslog(LOG_INFO, "interface: %s", act->name);                
 
-    syslog(LOG_INFO, "test=%s(%ld) repair=%s(%d) alive=%s heartbeat=%s temp=%s to=%s no_act=%s",
+    syslog(LOG_INFO, "test=%s(%ld) repair=%s(%ld) alive=%s heartbeat=%s temp=%s to=%s no_act=%s",
 	    (tbinary == NULL) ? "none" : tbinary, timeout, 
 	    (rbinary == NULL) ? "none" : rbinary, rtimeout,
 	    (devname == NULL) ? "none" : devname,
@@ -886,16 +975,37 @@ int main(int argc, char *const argv[])
 #endif
 
     /* tell oom killer to not kill this process */
-    sprintf(filename_buf, "/proc/%d/oom_adj", pid);
-    fp = fopen(filename_buf, "w");
-    if (fp != NULL) {
-	fprintf(fp, "-17\n");
-	(void) fclose(fp);
+#ifdef OOM_SCORE_ADJ_MIN
+    if ( ! stat("/proc/self/oom_score_adj", &s) ) {
+	fp = fopen("/proc/self/oom_score_adj", "w");
+	if (fp) {
+		fprintf(fp, "%d\n", OOM_SCORE_ADJ_MIN);
+		(void) fclose(fp);
+		oom_adjusted = 1;
+	}
     }
+#endif
+#ifdef OOM_DISABLE
+    if ( ! oom_adjusted ) {
+	if ( ! stat("/proc/self/oom_adj", &s) ) {
+		fp = fopen("/proc/self/oom_adj", "w");
+		if (fp) {
+			fprintf(fp, "%d\n", OOM_DISABLE);
+			(void) fclose(fp);
+			oom_adjusted = 1;
+		}
+	}
+    }
+#endif
+#if USE_SYSLOG
+    if ( ! oom_adjusted ) {
+	syslog(LOG_WARNING, "unable to disable oom handling!");
+    }
+#endif				/* USE_SYSLOG */
 
     /* main loop: update after <tint> seconds */
     while (_running) {
-	wd_action(keep_alive(), rbinary, NULL);
+	wd_action(keep_alive(), rbinary, NULL, 0);
 
 	/* sync system if we have to */
 	do_check(sync_system(sync_it), rbinary, NULL);
@@ -929,7 +1039,14 @@ int main(int argc, char *const argv[])
 	    do_check(check_net(act->name, act->parameter.net.sock_fp, act->parameter.net.to, act->parameter.net.packet, tint , pingcount), rbinary, act->name);
 
 	/* in user mode execute the given binary or just test fork() call */
-	do_check(check_bin(tbinary, timeout), rbinary, NULL);
+	do_check(check_bin(tbinary, timeout, 0), rbinary, NULL);
+
+#ifdef TESTBIN_PATH
+	/* test/repair binaries in the watchdog.d directory */
+	for (act = tr_bin; act != NULL; act = act->next)
+		/* Use version 1 for testbin-path */
+	    do_check2(check_bin(act->name, timeout, 1), act->name, rbinary, NULL);
+#endif
 
 	/* finally sleep some seconds */
 	usleep(tint * 500000); /* this should make watchdog sleep tint seconds alltogther */
@@ -947,4 +1064,5 @@ int main(int argc, char *const argv[])
 
     terminate();
     /* not reached */
+    exit (EXIT_SUCCESS);
 }
