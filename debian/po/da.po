@@ -1,18 +1,17 @@
-# Dutch translation of watchdog debconf templates.
-# Copyright (C) 2006-2012 THE PACKAGE'S COPYRIGHT HOLDER
+# Danish translation watchdog.
+# Copyright (C) 2011 watchdog & nedenstående oversættere.
 # This file is distributed under the same license as the watchdog package.
-# Kurt De Bree <kdebree(AT)telenet(DOT)be>, 2006
-# Jeroen Schot <schot@a-eskwadraat.nl>, 2012.
+# Joe Hansen <joedalton2@yahoo.dk>, 2011.
 #
 msgid ""
 msgstr ""
-"Project-Id-Version: watchdog 5.11-1\n"
+"Project-Id-Version: watchdog\n"
 "Report-Msgid-Bugs-To: meskes@debian.org\n"
 "POT-Creation-Date: 2007-07-16 08:48+0200\n"
-"PO-Revision-Date: 2012-01-27 10:40+0100\n"
-"Last-Translator: Jeroen Schot <schot@a-eskwadraat.nl>\n"
-"Language-Team: debian-l10n-dutch <debian-l10n-dutch@lists.debian.org>\n"
-"Language: nl\n"
+"PO-Revision-Date: 2011-12-04 22:21+0100\n"
+"Last-Translator: Joe Hansen <joedalton2@yahoo.dk>\n"
+"Language-Team: Danish <debian-l10n-danish@lists.debian.org>\n"
+"Language: da\n"
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=UTF-8\n"
 "Content-Transfer-Encoding: 8bit\n"
@@ -21,7 +20,7 @@ msgstr ""
 #. Description
 #: ../templates:2001
 msgid "Start watchdog at boot time?"
-msgstr "watchdog starten tijdens opstarten van het systeem?"
+msgstr "Igangsæt watchdog ved opstart?"
 
 #. Type: boolean
 #. Description
@@ -30,15 +29,15 @@ msgid ""
 "Please specify whether watchdog should be started as part of the boot "
 "process. This can be changed later by editing /etc/default/watchdog."
 msgstr ""
-"Gelieve aan te geven of watchdog gestart dient te worden tijdens het "
-"opstarten van het systeem. Dit kan later aangepast worden door /etc/default/"
-"watchdog te wijzigen."
+"Angiv venligst hvorvidt watchdog skal igangsættes som en del af "
+"opstartsprocessen. Dette kan ændres senere ved at redigere "
+"/etc/default/watchdog."
 
 #. Type: boolean
 #. Description
 #: ../templates:3001
 msgid "Restart watchdog on upgrades?"
-msgstr "watchdog herstarten bij opwaarderingen?"
+msgstr "Genstart watchdog ved opgraderinger?"
 
 #. Type: boolean
 #. Description
@@ -48,16 +47,15 @@ msgid ""
 "is not the default setting), restarting watchdog will cause a spurious "
 "reboot (the kernel will assume that the watchdog daemon crashed)."
 msgstr ""
-"Indien uw kernel is geconfigureerd met de optie 'CONFIG_WATCHDOG_NOWAYOUT', "
-"zal het herstarten van watchdog ten onrechte een herstart van uw computer "
-"veroorzaken (de kernel zal aannemen dat de watchdog-achtergronddienst is "
-"vastgelopen)."
+"Hvis kernen er konfigureret med tilvalget CONFIG_WATCHDOG_NOWAYOUT (som "
+"ikke er standardindstillingen) vil genstart af watchdog medføre en falsk "
+"genstart (kernen vil antage at watchdog-dæmonen brød ned)."
 
 #. Type: string
 #. Description
 #: ../templates:4001
 msgid "Watchdog module to preload:"
-msgstr "Voor te laden watchdog-module:"
+msgstr "Watchdog-modul at præindlæse:"
 
 #. Type: string
 #. Description
@@ -67,6 +65,7 @@ msgid ""
 "watchdog. The 'softdog' module should be suited for all installations. Enter "
 "'none' if you don't want the script to load a module."
 msgstr ""
-"Welke watchdog-module moeten worden geladen voordat watchdog wordt "
-"opgestart? De 'softdog'-module is geschikt voor de meeste installaties. Kies "
-"'none' als u wilt dat het script geen module laadt."
+"Vælg venligst hvilket watchdog-modul der skal præindlæses før start af "
+"watchdog. Modulet »softdog« bør være egnet for alle installationer. Indtast "
+"»none« (ingen) hvis du ikke ønsker, at skriptet skal indlæse et modul."
+

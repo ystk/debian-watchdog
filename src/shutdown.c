@@ -24,7 +24,6 @@
 #include <sys/types.h>
 #include <unistd.h>
 #include <time.h>
-#include <rpc/types.h>         /* for caddr_t */
 
 #include "watch_err.h"
 #include "extern.h"
@@ -459,7 +458,8 @@ void do_shutdown(int errorcode)
 	wtmp.ut_pid = 0;
 	wtmp.ut_type = RUN_LVL;
 	wtmp.ut_time = t;
-	write(fd, (char *) &wtmp, sizeof(wtmp));
+	if (write(fd, (char *) &wtmp, sizeof(wtmp)) < 0)
+		perror(progname);
 	close(fd);
     }
     
@@ -474,8 +474,10 @@ void do_shutdown(int errorcode)
 	    if ((fd_bck = creat(seedbck, S_IRUSR | S_IWUSR)) >= 0) {
 		char buf[512];
 
-		if (read(fd_seed, buf, 512) == 512)
-		    write(fd_bck, buf, 512);
+		if (read(fd_seed, buf, 512) == 512) {
+		    if (write(fd_bck, buf, 512) < 0)
+			perror(progname);
+		}
 		close(fd_bck);
 	    }
 	    close(fd_seed);
