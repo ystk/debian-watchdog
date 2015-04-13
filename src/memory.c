@@ -1,4 +1,13 @@
-/* $Header: /cvsroot/watchdog/watchdog/src/memory.c,v 1.2 2006/07/31 09:39:23 meskes Exp $ */
+/* > memory.c
+ *
+ * Code for periodically checking the 'free' memory in the system. Added in the
+ * functions open_memcheck() and close_memcheck() based on stuff from old watchdog.c
+ * and shutdown.c to make it more self-contained.
+ *
+ * TO DO:
+ * Should we have separate configuration for checking swap use?
+ *
+ */
 
 #ifdef HAVE_CONFIG_H
 #include "config.h"
@@ -8,85 +17,140 @@
 #include <unistd.h>
 #include <stdlib.h>
 #include <string.h>
+#include <fcntl.h>
+#include <sys/stat.h>
 #include <sys/param.h>
+#include <sys/mman.h>
+
 #include "extern.h"
 #include "watch_err.h"
-
-#if USE_SYSLOG
-#include <syslog.h>
-#endif
 
 #define FREEMEM		"MemFree:"
 #define FREESWAP	"SwapFree:"
 
+static int mem_fd = -1;
+static const char mem_name[] = "/proc/meminfo";
+
+/*
+ * Open the memory information file if such as test is configured.
+ */
+
+int open_memcheck(void)
+{
+	int rv = -1;
+
+	if (minpages > 0) {
+		/* open the memory info file */
+		mem_fd = open(mem_name, O_RDONLY);
+		if (mem_fd == -1) {
+			int err = errno;
+			log_message(LOG_ERR, "cannot open %s (errno = %d = '%s')", mem_name, err, strerror(err));
+		} else {
+			rv = 0;
+		}
+	}
+
+	return rv;
+}
+
+/*
+ * Read and check the contents of the memory information file.
+ */
+
 int check_memory(void)
 {
-    char buf[1024], *ptr1, *ptr2;
-    unsigned int free;
+	char buf[1024], *ptr1, *ptr2;
+	unsigned int free;
 
-    /* is the memory file open? */
-    if (mem == -1)
+	/* is the memory file open? */
+	if (mem_fd == -1)
+		return (ENOERR);
+
+	/* position pointer at start of file */
+	if (lseek(mem_fd, 0, SEEK_SET) < 0) {
+		int err = errno;
+		log_message(LOG_ERR, "lseek %s gave errno = %d = '%s'", mem_name, err, strerror(err));
+
+		if (softboot)
+			return (err);
+
+		return (ENOERR);
+	}
+
+	/* read the file */
+	if (read(mem_fd, buf, sizeof(buf)) < 0) {
+		int err = errno;
+		log_message(LOG_ERR, "read %s gave errno = %d = '%s'", mem_name, err, strerror(err));
+
+		if (softboot)
+			return (err);
+
+		return (ENOERR);
+	}
+
+	ptr1 = strstr(buf, FREEMEM);
+	ptr2 = strstr(buf, FREESWAP);
+
+	if (!ptr1 || !ptr2) {
+		log_message(LOG_ERR, "%s contains invalid data (read = %s)", mem_name, buf);
+
+		if (softboot)
+			return (EINVMEM);
+
+		return (ENOERR);
+	}
+
+	/* we only care about integer values */
+	free = atoi(ptr1 + strlen(FREEMEM)) + atoi(ptr2 + strlen(FREESWAP));
+
+	if (verbose && logtick && ticker == 1)
+		log_message(LOG_INFO, "currently there are %d kB of free memory available", free);
+
+	if (free < minpages * (EXEC_PAGESIZE / 1024)) {
+		log_message(LOG_ERR, "memory %d kB is less than %d pages", free, minpages);
+		return (ENOMEM);
+	}
+
 	return (ENOERR);
+}
 
-    /* position pointer at start of file */
-    if (lseek(mem, 0, SEEK_SET) < 0) {
-	int err = errno;
+/*
+ * Close the special memory data file (if open).
+ */
 
-#if USE_SYSLOG
-	syslog(LOG_ERR, "lseek /proc/meminfo gave errno = %d = '%m'", err);
-#else				/* USE_SYSLOG */
-	perror(progname);
-#endif				/* USE_SYSLOG */
-	if (softboot)
-	    return (err);
+int close_memcheck(void)
+{
+	int rv = -1;
 
-	return (ENOERR);
-    }
-    
-    /* read the file */
-    if (read(mem, buf, sizeof(buf)) < 0) {
-	int err = errno;
+	if (mem_fd != -1 && close(mem_fd) == -1) {
+		log_message(LOG_ALERT, "cannot close %s (errno = %d)", mem_name, errno);
+	}
 
-#if USE_SYSLOG
-	syslog(LOG_ERR, "read /proc/meminfo gave errno = %d = '%m'", err);
-#else				/* USE_SYSLOG */
-	perror(progname);
-#endif				/* USE_SYSLOG */
-	if (softboot)
-	    return (err);
+	mem_fd = -1;
+	return rv;
+}
 
-	return (ENOERR);
-    }
-    
-    ptr1 = strstr(buf, FREEMEM);
-    ptr2 = strstr(buf, FREESWAP);
-    
-    if (!ptr1 || !ptr2) {
-#if USE_SYSLOG
-	syslog(LOG_ERR, "/proc/meminfo contains invalid data (read = %s)", buf);
-#else				/* USE_SYSLOG */
-	perror(progname);
-#endif				/* USE_SYSLOG */
-	if (softboot)
-	    return (EINVMEM);
+int check_allocatable(void)
+{
+	int i;
+	char *mem;
+	size_t len = EXEC_PAGESIZE * (size_t)minalloc;
 
-	return (ENOERR);
-    }
+	if (minalloc <= 0)
+		return 0;
 
-    /* we only care about integer values */
-    free = atoi(ptr1+strlen(FREEMEM)) + atoi(ptr2+strlen(FREESWAP));
+	/*
+	 * Map and fault in the pages
+	 */
+	mem = mmap(NULL, len, PROT_READ | PROT_WRITE,
+			 MAP_PRIVATE | MAP_ANONYMOUS | MAP_POPULATE, 0, 0);
+	if (mem == MAP_FAILED) {
+		i = errno;
+		log_message(LOG_ALERT, "cannot allocate %lu bytes (errno = %d = '%s')",
+			    (unsigned long)len, i, strerror(i));
+		return i;
+	}
 
-#if USE_SYSLOG
-    if (verbose && logtick && ticker == 1)
-	syslog(LOG_INFO, "currently there are %d kB of free memory available", free);
-#endif				/* USE_SYSLOG */
-
-    if (free < minpages * (EXEC_PAGESIZE / 1024)) {
-#if USE_SYSLOG
-	syslog(LOG_ERR, "memory %d kB is less than %d pages", free, minpages);
-#endif				/* USE_SYSLOG */
-	return (ENOMEM);
-    }
-    
-    return (ENOERR);
+	munmap(mem, len);
+	return 0;
 }
